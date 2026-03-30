@@ -1,0 +1,9 @@
+{
+  "id": "maxcode",
+  "name": "MaxCode",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Obsidian coding assistant plugin powered by OpenAI/Codex.",
+  "author": "crazymax",
+  "isDesktopOnly": true
+}
