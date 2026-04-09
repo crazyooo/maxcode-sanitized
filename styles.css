@@ -4888,14 +4888,40 @@ code .claudian-file-link:hover {
 .maxcode-activity-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
 }
 
 .maxcode-activity-step {
+  margin: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background-primary) 88%, var(--background-secondary));
+}
+
+.maxcode-activity-step[open] {
+  background: var(--background-primary);
+}
+
+.maxcode-activity-step.is-running {
+  border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+}
+
+.maxcode-activity-step.is-running .maxcode-activity-summary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--interactive-accent) 7%, transparent), transparent);
+}
+
+.maxcode-activity-summary {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 6px 0;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.maxcode-activity-summary::-webkit-details-marker {
+  display: none;
 }
 
 .maxcode-activity-rail {
@@ -4906,7 +4932,7 @@ code .claudian-file-link:hover {
   flex-shrink: 0;
 }
 
-.maxcode-activity-step:not(:last-child) .maxcode-activity-rail::after {
+.maxcode-activity-step:not(:last-child) .maxcode-activity-summary .maxcode-activity-rail::after {
   content: "";
   position: absolute;
   top: 18px;
@@ -4958,6 +4984,163 @@ code .claudian-file-link:hover {
 .maxcode-activity-meta {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.maxcode-activity-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.maxcode-step-duration-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  color: var(--text-muted);
+}
+
+.maxcode-step-duration-row::before,
+.maxcode-step-duration-row::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 18px;
+  background: color-mix(in srgb, var(--background-modifier-border) 82%, transparent);
+}
+
+.maxcode-step-duration {
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.maxcode-step-duration-row.is-running .maxcode-step-duration,
+.maxcode-step-duration-row.is-running .maxcode-step-duration-chevron {
+  color: var(--interactive-accent);
+}
+
+.maxcode-step-duration-row.is-failed .maxcode-step-duration,
+.maxcode-step-duration-row.is-failed .maxcode-step-duration-chevron {
+  color: var(--text-error);
+}
+
+.maxcode-step-duration-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.maxcode-activity-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.maxcode-activity-step[open] .maxcode-activity-toggle {
+  transform: rotate(180deg);
+}
+
+.maxcode-activity-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px 40px;
+}
+
+.maxcode-activity-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--background-modifier-border) 70%, transparent);
+}
+
+.maxcode-activity-action:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.maxcode-activity-action-kind {
+  flex-shrink: 0;
+  min-width: 74px;
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.maxcode-activity-action-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.maxcode-activity-action-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-normal);
+  word-break: break-word;
+}
+
+.maxcode-activity-action-time {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.maxcode-activity-action-details {
+  display: block;
+}
+
+.maxcode-activity-action-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.maxcode-activity-action-summary::-webkit-details-marker {
+  display: none;
+}
+
+.maxcode-activity-action-expand {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--interactive-accent);
+  white-space: nowrap;
+}
+
+.maxcode-activity-action-full {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--background-modifier-border) 75%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--background-secondary) 72%, var(--background-primary));
+}
+
+.maxcode-now-panel .maxcode-section-title {
+  margin-bottom: 8px;
+}
+
+.maxcode-section-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .maxcode-login-status {
@@ -5114,6 +5297,10 @@ code .claudian-file-link:hover {
 .claudian-container .claudian-thinking-content {
   margin-top: 4px;
   border-left-width: 1px;
+}
+
+.claudian-container .maxcode-worklog-panel {
+  margin-top: 10px;
 }
 
 .claudian-container .claudian-input-wrapper {
