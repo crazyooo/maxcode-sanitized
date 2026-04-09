@@ -189,26 +189,248 @@ var MaxCodeChatView = class extends import_obsidian.ItemView {
     if (statusEvents.length > 0) {
       this.renderStatusPanel(content, message, statusEvents);
     }
-    const traceEvents = (message.events ?? []).filter((event) => event.kind === "trace");
-    if (traceEvents.length > 0) {
-      this.renderTracePanel(content, message, traceEvents);
+    const workLog = this.buildWorkLogSteps(message);
+    if (workLog.length > 0) {
+      this.renderWorkLogPanel(content, message, workLog);
     }
-    const visibleEvents = (message.events ?? []).filter((event) => event.kind !== "status" && event.kind !== "trace");
-    if (visibleEvents.length > 0) {
-      const timeline = content.createDiv({ cls: "maxcode-timeline" });
-      timeline.createDiv({ cls: "maxcode-timeline-title", text: "Timeline" });
-      for (const event of visibleEvents) {
-        const block = timeline.createDiv({ cls: "claudian-tool-call" });
-        const header = block.createDiv({ cls: "claudian-tool-header" });
-        header.createSpan({ cls: "claudian-tool-label", text: event.kind });
-        header.createSpan({
-          cls: "claudian-tool-status status-completed",
-          text: new Date(event.at).toLocaleTimeString()
+  }
+  buildWorkLogSteps(message) {
+    const events = Array.isArray(message.events) ? [...message.events].sort((a, b) => a.at - b.at) : [];
+    if (events.length === 0) {
+      return [];
+    }
+    const traceEvents = events.filter((event) => event.kind === "trace");
+    if (traceEvents.length > 0) {
+      const deduped = /* @__PURE__ */ new Map();
+      for (const event of traceEvents) {
+        const key = event.traceId?.trim() || `${event.at}:${event.text}`;
+        deduped.set(key, event);
+      }
+      const steps = Array.from(deduped.values()).sort((a, b) => a.at - b.at).map((event, index) => ({
+        id: event.traceId?.trim() || `trace-${index}-${event.at}`,
+        text: this.getTraceEventLabel(event),
+        at: event.at,
+        startedAt: event.at,
+        updatedAt: event.at,
+        state: event.traceState === "failed" ? "failed" : event.traceState === "completed" ? "completed" : "running",
+        kind: this.getTraceEventKindLabel(event),
+        actions: []
+      }));
+      const firstStepAt = steps[0]?.at ?? 0;
+      let currentStep = null;
+      for (const event of events) {
+        if (event.kind === "trace") {
+          currentStep = steps.find((step) => step.id === (event.traceId?.trim() || ""));
+          if (!currentStep) {
+            currentStep = steps.find((step) => step.at === event.at && step.text === event.text) ?? currentStep;
+          }
+          continue;
+        }
+        if (event.kind === "status") {
+          continue;
+        }
+        const targetStep = currentStep ?? steps.find((step) => step.at >= event.at) ?? steps[0];
+        if (!targetStep) {
+          continue;
+        }
+        targetStep.updatedAt = Math.max(targetStep.updatedAt ?? targetStep.at, event.at);
+        targetStep.actions.push(this.createWorkLogAction(event));
+      }
+      const preludeActions = events.filter((event) => event.kind !== "trace" && event.kind !== "status" && event.at < firstStepAt).map((event) => this.createWorkLogAction(event));
+      if (preludeActions.length > 0) {
+        steps.unshift({
+          id: `setup-${firstStepAt}`,
+          text: "Set up task context",
+          at: firstStepAt - 1,
+          startedAt: firstStepAt - 1,
+          updatedAt: preludeActions[preludeActions.length - 1]?.at ?? firstStepAt - 1,
+          state: "completed",
+          kind: "Setup",
+          actions: preludeActions
         });
-        const body = block.createDiv({ cls: "claudian-tool-content" });
-        body.createDiv({ cls: "claudian-tool-result-item", text: event.text });
+      }
+      return steps;
+    }
+    const steps = [];
+    let currentStep = null;
+    for (const event of events) {
+      if (event.kind === "status" && event.statusKey !== "thinking-timer") {
+        currentStep = {
+          id: `status-${event.at}-${steps.length}`,
+          text: this.getWorkLogStepText(event.text),
+          at: event.at,
+          startedAt: event.at,
+          updatedAt: event.at,
+          state: "running",
+          kind: "Progress",
+          actions: []
+        };
+        steps.push(currentStep);
+        continue;
+      }
+      if (event.kind === "status") {
+        continue;
+      }
+      if (!currentStep) {
+        currentStep = {
+          id: `step-${event.at}-${steps.length}`,
+          text: "Working",
+          at: event.at,
+          startedAt: event.at,
+          updatedAt: event.at,
+          state: "running",
+          kind: "Progress",
+          actions: []
+        };
+        steps.push(currentStep);
+      }
+      currentStep.updatedAt = Math.max(currentStep.updatedAt ?? currentStep.at, event.at);
+      currentStep.actions.push(this.createWorkLogAction(event));
+    }
+    for (let i = 0; i < steps.length; i += 1) {
+      const isLast = i === steps.length - 1;
+      if (!isLast) {
+        steps[i].state = "completed";
+        continue;
+      }
+      steps[i].state = message.traceOverallState === "failed" ? "failed" : message.traceOverallState === "completed" ? "completed" : "running";
+    }
+    return steps;
+  }
+  createWorkLogAction(event) {
+    const text = this.getWorkLogActionText(event);
+    return {
+      id: `${event.kind}-${event.at}-${event.text}`,
+      kind: this.getWorkLogActionLabel(event.kind),
+      text,
+      shortText: this.getWorkLogActionPreview(text),
+      isLong: text.length > 160,
+      at: event.at
+    };
+  }
+  getWorkLogStepText(text, traceKind) {
+    const normalized = normalizeStatusText(typeof text === "string" ? text : "");
+    if (!normalized) {
+      return traceKind === "command" ? "Running command" : "Working";
+    }
+    if (normalized === "Analyzing request" || normalized === "Preparing final answer") {
+      return normalized;
+    }
+    if (normalized === "Thinking") {
+      return "Analyzing request";
+    }
+    if (/^Read:\s+/.test(normalized)) {
+      return normalized.replace(/^Read:\s+/, "Inspecting ");
+    }
+    if (/^Search:\s+/.test(normalized)) {
+      return normalized.replace(/^Search:\s+/, "Searching ");
+    }
+    if (/^Run:\s+/.test(normalized)) {
+      return normalized.replace(/^Run:\s+/, "Running ");
+    }
+    if (/^List:\s+/.test(normalized)) {
+      return normalized.replace(/^List:\s+/, "Listing ");
+    }
+    return normalized;
+  }
+  getTraceEventLabel(event) {
+    if (event?.payload && typeof event.payload === "object" && typeof event.payload.label === "string" && event.payload.label.trim()) {
+      return event.payload.label.trim();
+    }
+    return this.getWorkLogStepText(typeof event?.text === "string" ? event.text : "", event?.traceKind);
+  }
+  getTraceEventKindLabel(event) {
+    if (event?.payload && typeof event.payload === "object" && typeof event.payload.phase === "string" && event.payload.phase.trim()) {
+      const phase = event.payload.phase.trim();
+      if (phase === "command") {
+        return "Command";
+      }
+      if (phase === "reasoning") {
+        return "Reasoning";
+      }
+      return phase.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+    return event?.traceKind === "command" ? "Command" : "Reasoning";
+  }
+  getWorkLogActionLabel(kind) {
+    switch (kind) {
+      case "tool_call":
+        return "Action";
+      case "tool_result":
+        return "Result";
+      case "trace":
+        return "Trace";
+      default:
+        return kind.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+  }
+  getWorkLogActionText(event) {
+    if (event.kind === "tool_call" && event.payload && typeof event.payload === "object") {
+      const toolName = typeof event.payload.toolName === "string" ? event.payload.toolName : "";
+      const rawArgs = typeof event.payload.rawArgs === "string" ? event.payload.rawArgs : "";
+      if (toolName) {
+        return summarizeToolCall(toolName, rawArgs);
       }
     }
+    if (event.kind === "tool_result" && event.payload && typeof event.payload === "object") {
+      const toolName = typeof event.payload.toolName === "string" ? event.payload.toolName : "";
+      const rawOutput = typeof event.payload.rawOutput === "string" ? event.payload.rawOutput : "";
+      const summary = typeof event.payload.summary === "string" ? event.payload.summary.trim() : "";
+      if (summary) {
+        return summary;
+      }
+      if (toolName) {
+        return summarizeToolResult(toolName, rawOutput);
+      }
+    }
+    const text = typeof event.text === "string" ? event.text.trim() : "";
+    if (event.kind === "tool_call") {
+      const match = text.match(/^([a-z0-9_]+)\(([\s\S]*)\)$/i);
+      if (match?.[1]) {
+        return summarizeToolCall(match[1], match[2] ?? "");
+      }
+    }
+    if (event.kind === "tool_result") {
+      const match = text.match(/^([a-z0-9_]+)\s+->\s+([\s\S]*)$/i);
+      if (match?.[1]) {
+        return summarizeToolResult(match[1], match[2] ?? "");
+      }
+    }
+    if (text.length <= 280) {
+      return text;
+    }
+    return `${text.slice(0, 277)}...`;
+  }
+  getWorkLogActionPreview(text) {
+    if (text.length <= 160) {
+      return text;
+    }
+    return `${text.slice(0, 157)}...`;
+  }
+  getStepDurationText(step) {
+    const startedAt = typeof step?.startedAt === "number" ? step.startedAt : typeof step?.at === "number" ? step.at : Date.now();
+    const updatedAt = typeof step?.updatedAt === "number" ? step.updatedAt : startedAt;
+    const endAt = step?.state === "running" ? Date.now() : Math.max(updatedAt, startedAt);
+    const durationMs = Math.max(0, endAt - startedAt);
+    if (durationMs < 1e3) {
+      return "<1s";
+    }
+    const totalSeconds = Math.round(durationMs / 1e3);
+    if (totalSeconds < 60) {
+      return `${totalSeconds}s`;
+    }
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes < 60) {
+      return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+    }
+    const hours = Math.floor(minutes / 60);
+    const remMinutes = minutes % 60;
+    return remMinutes > 0 ? `${hours}h ${remMinutes}m` : `${hours}h`;
+  }
+  getStepDurationLabel(step) {
+    const prefix = step?.state === "running" ? "Elapsed" : "Processed";
+    return `${prefix} ${this.getStepDurationText(step)}`;
   }
   renderStatusPanel(container, message, statusEvents) {
     const latestStatus = this.getLatestStatusEvent(statusEvents);
@@ -221,8 +443,10 @@ var MaxCodeChatView = class extends import_obsidian.ItemView {
     }
     const isFailed = message.traceOverallState === "failed";
     const isCompleted = message.traceOverallState === "completed";
-    const headerText = isFailed ? message.traceOverallLabel?.trim() || latestStatus.text : isCompleted && latestStatus.statusKey === "thinking-timer" ? message.traceOverallLabel?.trim() || "Completed" : latestStatus.text;
-    const block = container.createDiv({ cls: "claudian-thinking-block" });
+    const latestStatusText = this.getStatusEventText(latestStatus);
+    const headerText = isFailed ? message.traceOverallLabel?.trim() || latestStatusText : isCompleted && latestStatus.statusKey === "thinking-timer" ? message.traceOverallLabel?.trim() || "Completed" : latestStatusText;
+    const block = container.createDiv({ cls: "claudian-thinking-block maxcode-now-panel" });
+    block.createDiv({ cls: "maxcode-section-title", text: "Now" });
     const header = block.createDiv({ cls: "claudian-thinking-header" });
     const icon = header.createDiv({ cls: "maxcode-activity-icon" });
     if (isFailed) {
@@ -233,57 +457,66 @@ var MaxCodeChatView = class extends import_obsidian.ItemView {
       (0, import_obsidian.setIcon)(icon, "loader-circle");
       icon.addClass("spinning");
     }
-    header.createSpan({ cls: "claudian-thinking-label", text: headerText });
-    const detailEvents = displayEvents.filter((event) => event.text !== headerText);
+    header.createSpan({ cls: "claudian-thinking-label", text: normalizeStatusText(headerText) });
+    const detailEvents = displayEvents.filter((event) => this.getStatusEventText(event) !== headerText);
     if (detailEvents.length === 0) {
       return;
     }
     const content = block.createDiv({ cls: "claudian-thinking-content" });
     for (const event of detailEvents) {
-      content.createEl("p", { text: event.text });
+      content.createEl("p", { text: normalizeStatusText(this.getStatusEventText(event)) });
     }
   }
-  renderTracePanel(container, message, traceEvents) {
-    const deduped = /* @__PURE__ */ new Map();
-    for (const event of traceEvents) {
-      const key = event.traceId?.trim() || `${event.at}:${event.text}`;
-      deduped.set(key, event);
+  getStatusEventText(event) {
+    if (event?.payload && typeof event.payload === "object" && typeof event.payload.label === "string" && event.payload.label.trim()) {
+      return event.payload.label.trim();
     }
-    const tasks = Array.from(deduped.values()).sort((a, b) => a.at - b.at);
-    if (tasks.length === 0) {
+    return typeof event?.text === "string" ? event.text.trim() : "";
+  }
+  renderWorkLogPanel(container, message, steps) {
+    if (steps.length === 0) {
       return;
     }
-    const hasFailedTask = tasks.some((task) => task.traceState === "failed");
-    let runningTask = null;
-    for (let i = tasks.length - 1; i >= 0; i -= 1) {
-      if (tasks[i].traceState === "in_progress") {
-        runningTask = tasks[i];
+    const hasFailedStep = steps.some((step) => step.state === "failed");
+    let runningStep = null;
+    for (let i = steps.length - 1; i >= 0; i -= 1) {
+      if (steps[i].state === "running") {
+        runningStep = steps[i];
         break;
       }
     }
-    const overallState = message.traceOverallState === "failed" || hasFailedTask ? "failed" : runningTask ? "running" : "completed";
-    const panel = container.createDiv({ cls: "maxcode-activity-panel" });
+    const overallState = message.traceOverallState === "failed" || hasFailedStep ? "failed" : runningStep ? "running" : "completed";
+    const panel = container.createDiv({ cls: "maxcode-activity-panel maxcode-worklog-panel" });
     const header = panel.createDiv({ cls: "maxcode-activity-header" });
-    header.createDiv({ cls: "maxcode-activity-title", text: "Activity" });
+    header.createDiv({ cls: "maxcode-activity-title", text: "Work Log" });
     if (overallState === "failed") {
       header.createDiv({
         cls: "maxcode-activity-status error",
         text: message.traceOverallLabel?.trim() || "Failed"
       });
-    } else if (runningTask) {
-      header.createDiv({ cls: "maxcode-activity-status", text: `Running ${runningTask.text}` });
+    } else if (runningStep) {
+      header.createDiv({ cls: "maxcode-activity-status", text: `Running ${runningStep.text}` });
     } else {
       header.createDiv({ cls: "maxcode-activity-status done", text: "Completed" });
     }
     const list = panel.createDiv({ cls: "maxcode-activity-list" });
-    for (const task of tasks) {
-      const row = list.createDiv({ cls: "maxcode-activity-step" });
-      const done = task.traceState === "completed";
-      const failed = task.traceState === "failed";
+    let runningSummary = null;
+    for (const step of steps) {
+      const row = list.createEl("details", { cls: "maxcode-activity-step" });
+      const done = step.state === "completed";
+      const failed = step.state === "failed";
+      const running = step.state === "running";
+      if (running || failed) {
+        row.setAttr("open", "open");
+      }
       row.toggleClass("is-done", done);
       row.toggleClass("is-failed", failed);
-      row.toggleClass("is-running", !done && !failed);
-      const rail = row.createDiv({ cls: "maxcode-activity-rail" });
+      row.toggleClass("is-running", running);
+      const summary = row.createEl("summary", { cls: "maxcode-activity-summary" });
+      if (running && !runningSummary) {
+        runningSummary = summary;
+      }
+      const rail = summary.createDiv({ cls: "maxcode-activity-rail" });
       const icon = rail.createDiv({ cls: "maxcode-activity-icon" });
       if (done) {
         (0, import_obsidian.setIcon)(icon, "check");
@@ -293,13 +526,55 @@ var MaxCodeChatView = class extends import_obsidian.ItemView {
         (0, import_obsidian.setIcon)(icon, "loader-circle");
         icon.addClass("spinning");
       }
-      const body = row.createDiv({ cls: "maxcode-activity-body" });
-      body.createDiv({ cls: "maxcode-activity-text", text: task.text });
-      const kindLabel = task.traceKind === "command" ? "Command" : "Reasoning";
-      body.createDiv({
+      const body = summary.createDiv({ cls: "maxcode-activity-body" });
+      body.createDiv({ cls: "maxcode-activity-text", text: step.text });
+      const metaRow = body.createDiv({ cls: "maxcode-activity-meta-row" });
+      metaRow.createDiv({
         cls: "maxcode-activity-meta",
-        text: `${kindLabel} \xB7 ${failed ? "Failed" : done ? "Completed" : "Running"}`
+        text: `${step.kind} \xB7 ${failed ? "Failed" : done ? "Completed" : "Running"}`
       });
+      const durationRow = body.createDiv({
+        cls: `maxcode-step-duration-row${running ? " is-running" : ""}${failed ? " is-failed" : ""}`
+      });
+      durationRow.createDiv({
+        cls: "maxcode-step-duration",
+        text: this.getStepDurationLabel(step)
+      });
+      const durationChevron = durationRow.createDiv({ cls: "maxcode-step-duration-chevron" });
+      (0, import_obsidian.setIcon)(durationChevron, "chevron-right");
+      const toggle = summary.createDiv({ cls: "maxcode-activity-toggle" });
+      (0, import_obsidian.setIcon)(toggle, "chevron-down");
+      if (step.actions.length === 0) {
+        continue;
+      }
+      const actions = row.createDiv({ cls: "maxcode-activity-actions" });
+      for (const action of step.actions) {
+        const actionRow = actions.createDiv({ cls: "maxcode-activity-action" });
+        actionRow.createDiv({ cls: "maxcode-activity-action-kind", text: action.kind });
+        const actionBody = actionRow.createDiv({ cls: "maxcode-activity-action-body" });
+        if (action.isLong) {
+          const actionDetails = actionBody.createEl("details", { cls: "maxcode-activity-action-details" });
+          const actionSummary = actionDetails.createEl("summary", { cls: "maxcode-activity-action-summary" });
+          actionSummary.createDiv({ cls: "maxcode-activity-action-text", text: action.shortText });
+          const expandHint = actionSummary.createDiv({ cls: "maxcode-activity-action-expand", text: "Show details" });
+          const fullText = actionDetails.createDiv({ cls: "maxcode-activity-action-full" });
+          fullText.createDiv({ cls: "maxcode-activity-action-text", text: action.text });
+          actionDetails.addEventListener("toggle", () => {
+            expandHint.setText(actionDetails.open ? "Hide details" : "Show details");
+          });
+        } else {
+          actionBody.createDiv({ cls: "maxcode-activity-action-text", text: action.text });
+        }
+        actionBody.createDiv({
+          cls: "maxcode-activity-action-time",
+          text: new Date(action.at).toLocaleTimeString()
+        });
+      }
+    }
+    if (runningSummary) {
+      window.setTimeout(() => {
+        runningSummary?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }, 0);
     }
   }
   renderModelSelector(toolbar) {
@@ -1146,15 +1421,15 @@ function extractStatusFromCodexJsonLine(line) {
     const parsed = JSON.parse(line);
     const type = typeof parsed.type === "string" ? parsed.type : "";
     if (type === "thread.started") {
-      return "Session started";
+      return "Starting session";
     }
     if (type === "turn.started") {
-      return "Thinking...";
+      return "Analyzing request";
     }
     if (type === "item.completed") {
       const item = parsed.item;
       if (item?.type === "agent_message") {
-        return "Generating final answer...";
+        return "Preparing final answer";
       }
     }
     if (type === "turn.completed") {
@@ -1168,6 +1443,41 @@ function extractStatusFromCodexJsonLine(line) {
   } catch (_error) {
   }
   return null;
+}
+function normalizeStatusText(rawText) {
+  const text = rawText.trim();
+  if (!text) {
+    return "";
+  }
+  if (/^Thinking\.\.\.\s+\d+s$/.test(text)) {
+    return text;
+  }
+  if (text === "Starting session" || text === "Session started") {
+    return "Starting session";
+  }
+  if (text === "Thinking..." || text === "Analyzing request") {
+    return "Analyzing request";
+  }
+  if (text === "Generating final answer..." || text === "Preparing final answer") {
+    return "Preparing final answer";
+  }
+  if (text === "using local codex cli agent mode") {
+    return "Using local Codex agent";
+  }
+  if (text === "run cancelled before execution") {
+    return "Run cancelled before execution";
+  }
+  if (text === "approval policy: approve_all") {
+    return "Approval mode: approve all";
+  }
+  if (text === "approval policy: step_by_step") {
+    return "Approval mode: step by step";
+  }
+  const stepMatch = text.match(/^step\s+(\d+):\s+requesting model decision$/i);
+  if (stepMatch?.[1]) {
+    return `Planning step ${stepMatch[1]}`;
+  }
+  return text;
 }
 function extractThreadIdFromCodexJsonLine(line) {
   if (!line.startsWith("{")) {
@@ -1214,6 +1524,133 @@ function summarizeReasoning(rawText) {
   const firstLine = cleaned.split("\n").map((line) => line.trim()).find(Boolean);
   return firstLine || "Reasoning";
 }
+function getTracePayload(kind, summary, extra) {
+  const label = kind === "command" ? normalizeTraceLabel(summary, "command") : normalizeTraceLabel(summary, "reasoning");
+  return {
+    label,
+    phase: kind === "command" ? "command" : "reasoning",
+    ...extra
+  };
+}
+function normalizeTraceLabel(summary, traceKind) {
+  const text = typeof summary === "string" ? summary.trim() : "";
+  if (!text) {
+    return traceKind === "command" ? "Running command" : "Analyzing request";
+  }
+  if (text === "Thinking") {
+    return "Analyzing request";
+  }
+  if (/^Read:\s+/.test(text)) {
+    return text.replace(/^Read:\s+/, "Inspecting ");
+  }
+  if (/^Search:\s+/.test(text)) {
+    return text.replace(/^Search:\s+/, "Searching ");
+  }
+  if (/^Run:\s+/.test(text)) {
+    return text.replace(/^Run:\s+/, "Running ");
+  }
+  if (/^List:\s+/.test(text)) {
+    return text.replace(/^List:\s+/, "Listing ");
+  }
+  return text;
+}
+function summarizeToolCall(name, rawArguments) {
+  let args = {};
+  if (typeof rawArguments === "string" && rawArguments.trim()) {
+    try {
+      const parsed = JSON.parse(rawArguments);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        args = parsed;
+      }
+    } catch (_error) {
+    }
+  }
+  const path = typeof args.path === "string" ? args.path.trim() : "";
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const command = typeof args.command === "string" ? cleanCommand(args.command) : "";
+  switch (name) {
+    case "read_file":
+      return path ? `Reading ${path}` : "Reading file";
+    case "write_file":
+      return path ? `Preparing changes for ${path}` : "Preparing file changes";
+    case "search_vault":
+      return query ? `Searching for “${query}”` : "Searching vault";
+    case "run_bash":
+      return command ? `Running ${command.slice(0, 72)}` : "Running command";
+    case "mcp_list_servers":
+      return "Listing MCP servers";
+    case "mcp_list_tools": {
+      const server = typeof args.server === "string" ? args.server.trim() : "";
+      return server ? `Listing tools on ${server}` : "Listing MCP tools";
+    }
+    case "mcp_call_tool": {
+      const server = typeof args.server === "string" ? args.server.trim() : "";
+      const tool = typeof args.tool === "string" ? args.tool.trim() : "";
+      if (server && tool) {
+        return `Calling ${tool} on ${server}`;
+      }
+      return "Calling MCP tool";
+    }
+    default:
+      return name.replace(/_/g, " ");
+  }
+}
+function summarizeToolResult(name, rawOutput) {
+  const output = typeof rawOutput === "string" ? rawOutput.trim() : "";
+  if (!output) {
+    return `Completed ${name.replace(/_/g, " ")}`;
+  }
+  switch (name) {
+    case "read_file": {
+      const match = output.match(/^Read file:\s+([^\n]+)/);
+      return match?.[1] ? `Loaded ${match[1]}` : "Loaded file";
+    }
+    case "write_file": {
+      const match = output.match(/^Wrote file:\s+([^\n]+)/);
+      return match?.[1] ? `Updated ${match[1]}` : "Updated file";
+    }
+    case "search_vault":
+      return output.startsWith("Found ") ? output.split("\n")[0] : "Search completed";
+    case "run_bash": {
+      const match = output.match(/^Command:\s+([^\n]+)/);
+      return match?.[1] ? `Finished ${cleanCommand(match[1]).slice(0, 72)}` : "Command completed";
+    }
+    case "mcp_list_servers":
+      return "Loaded MCP server list";
+    case "mcp_list_tools":
+      return "Loaded MCP tool list";
+    case "mcp_call_tool":
+      return output.split("\n")[0].replace(/^MCP result\s*/i, "").trim() || "MCP tool completed";
+    default:
+      return output.split("\n")[0].slice(0, 140);
+  }
+}
+function buildEventText(kind, payload, fallbackText) {
+  if (typeof fallbackText === "string" && fallbackText.trim()) {
+    return fallbackText.trim();
+  }
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  if (kind === "status") {
+    return typeof payload.label === "string" ? payload.label.trim() : "";
+  }
+  if (kind === "tool_call") {
+    const toolName = typeof payload.toolName === "string" ? payload.toolName.trim() : "";
+    const rawArgs = typeof payload.rawArgs === "string" ? payload.rawArgs : "";
+    if (toolName) {
+      return `${toolName}(${rawArgs})`;
+    }
+  }
+  if (kind === "tool_result") {
+    const toolName = typeof payload.toolName === "string" ? payload.toolName.trim() : "";
+    const rawOutput = typeof payload.rawOutput === "string" ? payload.rawOutput : "";
+    if (toolName) {
+      return `${toolName} -> ${rawOutput}`;
+    }
+  }
+  return "";
+}
 function extractTraceEventFromCodexJsonLine(line) {
   if (!line.startsWith("{")) {
     return null;
@@ -1233,20 +1670,28 @@ function extractTraceEventFromCodexJsonLine(line) {
     const status = eventType === "item.started" ? "in_progress" : "completed";
     if (itemType === "command_execution") {
       const command = typeof item.command === "string" ? item.command : "";
+      const summary = summarizeCommand(command) || "Run command";
       return {
         id,
         kind: "command",
         status,
-        summary: summarizeCommand(command) || "Run command"
+        summary,
+        payload: getTracePayload("command", summary, {
+          command: cleanCommand(command)
+        })
       };
     }
     if (itemType === "reasoning") {
       const text = typeof item.text === "string" ? item.text : "";
+      const summary = status === "completed" ? summarizeReasoning(text) : "Thinking";
       return {
         id,
         kind: "reasoning",
         status,
-        summary: status === "completed" ? summarizeReasoning(text) : "Thinking"
+        summary,
+        payload: getTracePayload("reasoning", summary, {
+          rawText: text
+        })
       };
     }
   } catch (_error) {
@@ -2863,7 +3308,10 @@ ${selected}`;
     return true;
   }
   async runAgentWithCodexCli(task, assistantMessage) {
-    this.appendEvent(assistantMessage, "status", "using local codex cli agent mode");
+    this.appendEvent(assistantMessage, "status", "Using local Codex agent", {
+      label: "Using local Codex agent",
+      source: "codex-cli"
+    });
     this.notifyMessagesChanged();
     const currentNoteContext = await this.buildCurrentNoteContext();
     const prompt = [
@@ -2883,14 +3331,21 @@ ${currentNoteContext}` : "",
     }
     const policy = await this.chooseApprovalPolicyForAgentRun();
     if (policy === "cancel") {
-      this.appendEvent(assistantMessage, "status", "run cancelled before execution");
+      this.appendEvent(assistantMessage, "status", "Run cancelled before execution", {
+        label: "Run cancelled before execution",
+        phase: "cancelled"
+      });
       return "Agent run cancelled.";
     }
     this.agentApproveAllForCurrentRun = policy === "approve_all";
     this.appendEvent(
       assistantMessage,
       "status",
-      this.agentApproveAllForCurrentRun ? "approval policy: approve_all" : "approval policy: step_by_step"
+      this.agentApproveAllForCurrentRun ? "Approval mode: approve all" : "Approval mode: step by step",
+      {
+        label: this.agentApproveAllForCurrentRun ? "Approval mode: approve all" : "Approval mode: step by step",
+        approvalMode: this.agentApproveAllForCurrentRun ? "approve_all" : "step_by_step"
+      }
     );
     const currentNoteContext = await this.buildCurrentNoteContext();
     const taskInput = [
@@ -2903,7 +3358,11 @@ ${currentNoteContext}` : ""
     const maxSteps = 8;
     try {
       for (let step = 1; step <= maxSteps; step++) {
-        this.appendEvent(assistantMessage, "status", `step ${step}: requesting model decision`);
+        this.appendEvent(assistantMessage, "status", `Planning step ${step}`, {
+          label: `Planning step ${step}`,
+          phase: "planning",
+          step
+        });
         this.notifyMessagesChanged();
         const response = await this.requestOpenAiResponse(endpoint, auth.token, {
           model: this.settings.model,
@@ -2923,7 +3382,11 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
         }
         const toolOutputs = [];
         for (const call of functionCalls) {
-          this.appendEvent(assistantMessage, "tool_call", `${call.name}(${call.arguments.slice(0, 220)})`);
+          this.appendEvent(assistantMessage, "tool_call", `${call.name}(${call.arguments.slice(0, 220)})`, {
+            toolName: call.name,
+            rawArgs: call.arguments,
+            callId: call.call_id
+          });
           this.notifyMessagesChanged();
           let args = {};
           if (call.arguments?.trim()) {
@@ -2933,7 +3396,13 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
             }
           }
           const output = await this.executeAgentToolCall(call.name, args);
-          this.appendEvent(assistantMessage, "tool_result", `${call.name} -> ${output.slice(0, 300)}`);
+          this.appendEvent(assistantMessage, "tool_result", `${call.name} -> ${output.slice(0, 300)}`, {
+            toolName: call.name,
+            rawOutput: output,
+            summary: summarizeToolResult(call.name, output),
+            callId: call.call_id,
+            ok: true
+          });
           this.notifyMessagesChanged();
           toolOutputs.push({
             type: "function_call_output",
@@ -2958,14 +3427,16 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
       mode
     });
   }
-  appendEvent(message, kind, text) {
+  appendEvent(message, kind, text, payload) {
     if (!message.events) {
       message.events = [];
     }
+    const normalizedPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : void 0;
     message.events.push({
       at: Date.now(),
       kind,
-      text
+      text: buildEventText(kind, normalizedPayload, text),
+      payload: normalizedPayload
     });
   }
   upsertTraceEvent(message, event) {
@@ -2973,6 +3444,7 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
       message.events = [];
     }
     const normalizedText = event.summary.trim() || (event.kind === "command" ? "Run command" : "Thinking");
+    const normalizedPayload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload : getTracePayload(event.kind, normalizedText);
     const index = message.events.findIndex((item) => item.kind === "trace" && item.traceId === event.id);
     if (index >= 0) {
       message.events[index] = {
@@ -2980,6 +3452,7 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
         at: Date.now(),
         kind: "trace",
         text: normalizedText,
+        payload: normalizedPayload,
         traceId: event.id,
         traceKind: event.kind,
         traceState: event.status
@@ -2990,13 +3463,14 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
       at: Date.now(),
       kind: "trace",
       text: normalizedText,
+      payload: normalizedPayload,
       traceId: event.id,
       traceKind: event.kind,
       traceState: event.status
     });
   }
-  upsertStatusEvent(message, text) {
-    const normalizedText = text.trim();
+  upsertStatusEvent(message, text, payload) {
+    const normalizedText = normalizeStatusText(text.trim());
     if (!normalizedText) {
       return;
     }
@@ -3004,31 +3478,36 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
       message.events = [];
     }
     const now = Date.now();
+    const normalizedPayload = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : { label: normalizedText };
     const isThinkingTimer = /^Thinking\.\.\.\s+\d+s$/.test(normalizedText);
     if (isThinkingTimer) {
       const timerEvent = this.findLatestStatusEvent(message.events, "thinking-timer");
       if (timerEvent) {
         timerEvent.at = now;
         timerEvent.text = normalizedText;
+        timerEvent.payload = normalizedPayload;
         return;
       }
       message.events.push({
         at: now,
         kind: "status",
         text: normalizedText,
+        payload: normalizedPayload,
         statusKey: "thinking-timer"
       });
       return;
     }
     const latestStatus = this.getLatestStatusEvent(message.events.filter((event) => event.kind === "status"));
-    if (latestStatus?.text === normalizedText) {
+    if (this.getStatusEventText(latestStatus) === normalizedText) {
       latestStatus.at = now;
+      latestStatus.payload = normalizedPayload;
       return;
     }
     message.events.push({
       at: now,
       kind: "status",
-      text: normalizedText
+      text: normalizedText,
+      payload: normalizedPayload
     });
   }
   getDisplayStatusEvents(message, statusEvents) {
@@ -3041,11 +3520,11 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
     } else if (displayEvents.length === 0 && timerEvent) {
       displayEvents.push(timerEvent);
     }
-    return displayEvents.filter((event, index, items) => items.findIndex((item) => item.text === event.text) === index);
+    return displayEvents.filter((event, index, items) => items.findIndex((item) => this.getStatusEventText(item) === this.getStatusEventText(event)) === index);
   }
   getLatestStatusEvent(statusEvents) {
     for (let i = statusEvents.length - 1; i >= 0; i -= 1) {
-      if (statusEvents[i]?.text?.trim()) {
+      if (this.getStatusEventText(statusEvents[i])) {
         return statusEvents[i];
       }
     }
@@ -3086,6 +3565,9 @@ Use tools when needed. When enough evidence is gathered, answer directly.`,
         at: Date.now(),
         kind: "trace",
         text: normalizedReason || "Request failed",
+        payload: getTracePayload("reasoning", normalizedReason || "Request failed", {
+          phase: "error"
+        }),
         traceId: `trace-error-${Date.now()}`,
         traceKind: "reasoning",
         traceState: "failed"
